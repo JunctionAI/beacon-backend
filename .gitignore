@@ -1,0 +1,55 @@
+# Environment and secrets
+.env
+*.env
+.env.local
+.env.production
+
+# Credentials and tokens
+*_credentials.json
+*_token.json
+.aws/
+.ssh/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Audio files
+*.mp3
+*.wav
+*.m4a
+
+# Logs
+*.log
+*.log.*
+
+# OS files
+.DS_Store
+.Trash/
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node
+node_modules/
+package-lock.json
+
+# Misc
+*.bak
+.cache/
+.config/
