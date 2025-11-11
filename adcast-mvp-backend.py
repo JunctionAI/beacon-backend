@@ -5,7 +5,7 @@ Focus: Generate REAL podcasts with REAL audio
 - YouTube: Real video search + transcripts
 - Articles: Web scraping
 - Books: Claude's knowledge (skip downloads for now)
-- Audio: ElevenLabs text-to-speech
+- Audio: Google Cloud TTS Journey voices (natural, conversational)
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile
@@ -1484,7 +1484,7 @@ class GeneratePodcastRequest(BaseModel):
     selectedTwitterAccounts: List[Dict] = []
     selectedArticles: List[Dict] = []
     duration: int = 45
-    voice_ids: Optional[List[str]] = None  # ElevenLabs voice IDs for speakers
+    voice_ids: Optional[List[str]] = None  # Google TTS Journey voice IDs for speakers
 
     # Personalization parameters
     tone_level: int = 5  # 1-10 scale (1=serious, 10=funny)
@@ -1606,13 +1606,13 @@ async def root():
         "service": "AdCast MVP API",
         "version": "1.0.0",
         "status": "running",
-        "features": ["Real YouTube search", "Web scraping", "ElevenLabs audio"]
+        "features": ["Real YouTube search", "Web scraping", "Google Cloud TTS audio"]
     }
 
 
 @app.get("/api/voices")
 async def get_voices():
-    """Get all available ElevenLabs voices for podcast generation"""
+    """Get all available Google TTS Journey voices for podcast generation"""
     if not elevenlabs_client:
         return {
             "voices": [],
@@ -2511,6 +2511,11 @@ SOURCE MATERIAL TO ANALYZE:
 4. **Progressive Understanding**: Start broad, go deeper, circle back to connect ideas
 5. **Verbal Thinking**: Show hosts processing information live (when appropriate for pacing)
 6. **Listener-Centric Framing**: Occasionally reference "you" the listener, acknowledging their curiosity
+7. **Natural Speech Patterns**: Use filler words and natural pauses for authenticity
+   - Include occasional filler words like "um", "uh", "like", "you know", "I mean", "sort of"
+   - Don't overuse - sprinkle them naturally (1-2 per paragraph at most)
+   - Use "..." for natural pauses mid-thought
+   - Example: "So, um, what's really interesting here is..." or "I mean, you know, the data shows..."
 
 **FORMATTING RULES - CRITICAL FOR AUDIO GENERATION:**
 - Write PURE DIALOGUE with NO speaker labels, names, or identifiers
@@ -2574,7 +2579,7 @@ Generate the complete {request.duration}-minute podcast script now (pure dialogu
         print(f"📝 Saved script to {script_path}")
 
         # 5. Generate AUDIO with overall timeout protection
-        print(f"\n🔊 Generating audio with ElevenLabs...")
+        print(f"\n🔊 Generating audio with Google Cloud TTS...")
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
         try:
@@ -2923,7 +2928,7 @@ if __name__ == "__main__":
     print("="*70)
     print("✅ Real YouTube search (API + fallback scraping)")
     print("✅ Real web search for articles (DuckDuckGo)")
-    print("✅ ElevenLabs audio generation")
+    print("✅ Google Cloud TTS audio generation")
     print("✅ Claude's knowledge for books")
     print("="*70)
     print(f"\n🚀 Running on http://0.0.0.0:{port}\n")
