@@ -63,7 +63,13 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 elevenlabs_client = None
 if ELEVENLABS_AVAILABLE and ELEVENLABS_API_KEY:
     try:
-        elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+        import httpx
+        # Create httpx client with aggressive timeout
+        http_client = httpx.Client(timeout=30.0)
+        elevenlabs_client = ElevenLabs(
+            api_key=ELEVENLABS_API_KEY,
+            httpx_client=http_client
+        )
     except Exception as e:
         print(f"⚠️  ElevenLabs init failed: {e}")
 
@@ -1407,29 +1413,37 @@ def generate_podcast_audio(script: str, voice_ids: List[str] = None) -> bytes:
 
         print(f"📝 Split script into {len(segments)} speaking segments across {len(voice_ids)} voices")
 
-        # Generate audio for each segment
+        # Generate audio for each segment with timeout protection
         audio_chunks = []
         for idx, (speaker_idx, text) in enumerate(segments):
             voice_id = voice_ids[speaker_idx]
 
             print(f"🎙️ Segment {idx + 1}/{len(segments)} - Voice {speaker_idx + 1}: {text[:60]}...")
+            import sys
+            sys.stdout.flush()  # Force immediate output on Railway
 
-            audio = elevenlabs_client.text_to_speech.convert(
-                text=text,
-                voice_id=voice_id,
-                model_id="eleven_monolingual_v1",
-                voice_settings=VoiceSettings(
-                    stability=0.5,
-                    similarity_boost=0.75
+            try:
+                audio = elevenlabs_client.text_to_speech.convert(
+                    text=text,
+                    voice_id=voice_id,
+                    model_id="eleven_monolingual_v1",
+                    voice_settings=VoiceSettings(
+                        stability=0.5,
+                        similarity_boost=0.75
+                    )
                 )
-            )
 
-            # Collect audio bytes
-            audio_bytes = b''
-            for chunk in audio:
-                audio_bytes += chunk
+                # Collect audio bytes
+                audio_bytes = b''
+                for chunk in audio:
+                    audio_bytes += chunk
 
-            audio_chunks.append(audio_bytes)
+                audio_chunks.append(audio_bytes)
+
+            except Exception as e:
+                print(f"⚠️ Segment {idx + 1} failed: {e} - skipping")
+                sys.stdout.flush()
+                continue  # Skip failed segment, continue with rest
 
         # Combine all audio chunks
         full_audio = b''.join(audio_chunks)
@@ -2546,9 +2560,21 @@ Generate the complete {request.duration}-minute podcast script now (pure dialogu
             f.write(script)
         print(f"📝 Saved script to {script_path}")
 
-        # 5. Generate AUDIO
+        # 5. Generate AUDIO with overall timeout protection
         print(f"\n🔊 Generating audio with ElevenLabs...")
-        audio_bytes = generate_podcast_audio(script, voice_ids=request.voice_ids)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        try:
+            # Run with 10-minute max timeout for entire audio generation
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(generate_podcast_audio, script, request.voice_ids)
+                audio_bytes = future.result(timeout=600)  # 10 minutes max
+        except FuturesTimeoutError:
+            print("⚠️ Audio generation timed out after 10 minutes - returning without audio")
+            audio_bytes = b""
+        except Exception as e:
+            print(f"⚠️ Audio generation failed: {e}")
+            audio_bytes = b""
 
         # Save audio to file
         audio_filename = f"podcast_{hash(request.curiosity) % 100000}.mp3"
