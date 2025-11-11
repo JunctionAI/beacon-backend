@@ -68,6 +68,35 @@ if ELEVENLABS_AVAILABLE and ELEVENLABS_API_KEY:
         print(f"⚠️  ElevenLabs init failed: {e}")
 
 
+# =================== STORAGE CONFIGURATION ===================
+
+from pathlib import Path
+
+def get_storage_dir():
+    """Get appropriate storage directory based on environment"""
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
+        # Running on Railway - use /tmp directory
+        storage_dir = Path("/tmp/podcasts")
+    else:
+        # Local development - use home directory
+        storage_dir = Path.home()
+
+    # Create directory if it doesn't exist
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    return storage_dir
+
+def get_backend_url():
+    """Get backend URL based on environment"""
+    # Railway provides RAILWAY_PUBLIC_DOMAIN or we can use custom env var
+    railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    if railway_domain:
+        return f"https://{railway_domain}"
+
+    # Custom environment variable for Railway URL
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+    return backend_url
+
+
 # =================== DATABASE SETUP ===================
 
 # SQLite database
@@ -2488,8 +2517,9 @@ Generate the complete {request.duration}-minute podcast script now (pure dialogu
         script = message.content[0].text
 
         # Save script to file for review
+        storage_dir = get_storage_dir()
         script_filename = f"podcast_script_{hash(request.curiosity) % 100000}.txt"
-        script_path = f"/Users/tomhall-taylor/{script_filename}"
+        script_path = storage_dir / script_filename
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(f"TOPIC: {request.curiosity}\n")
             f.write(f"DURATION: {request.duration} minutes\n")
@@ -2505,17 +2535,18 @@ Generate the complete {request.duration}-minute podcast script now (pure dialogu
 
         # Save audio to file
         audio_filename = f"podcast_{hash(request.curiosity) % 100000}.mp3"
-        audio_path = f"/Users/tomhall-taylor/{audio_filename}"
+        audio_path = storage_dir / audio_filename
 
         if audio_bytes:
             with open(audio_path, 'wb') as f:
                 f.write(audio_bytes)
             print(f"✅ Saved audio to {audio_path}")
 
+        backend_url = get_backend_url()
         return {
             "status": "completed",
             "script": script,
-            "audio_url": f"http://192.168.4.40:8000/audio/{audio_filename}" if audio_bytes else None,
+            "audio_url": f"{backend_url}/audio/{audio_filename}" if audio_bytes else None,
             "audio_available": bool(audio_bytes),
             "sources_used": sources_used
         }
@@ -2535,13 +2566,14 @@ async def serve_audio(filename: str):
     if not filename.endswith('.mp3') or '/' in filename or '\\' in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
-    audio_path = f"/Users/tomhall-taylor/{filename}"
+    storage_dir = get_storage_dir()
+    audio_path = storage_dir / filename
 
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     return FileResponse(
-        audio_path,
+        str(audio_path),
         media_type="audio/mpeg",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
