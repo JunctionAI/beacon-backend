@@ -605,7 +605,7 @@ def perplexity_deep_research(query: str, use_deep_research: bool = False) -> Dic
                 "Content-Type": "application/json"
             },
             json=payload,
-            timeout=60
+            timeout=25  # Reduced from 60 to 25 seconds for faster failure
         )
 
         if http_response.status_code != 200:
@@ -1727,10 +1727,18 @@ Respond in JSON:
                 yield f"data: {json.dumps({'type': 'searching', 'query': curiosity, 'category': 'articles'})}\n\n"
                 await asyncio.sleep(0.2)
 
-                # Run Perplexity search with timeout protection (in thread)
-                result = await asyncio.to_thread(perplexity_deep_research, curiosity, False)
-                articles = result.get("sources", [])
-                print(f"✅ SSE: Got {len(articles)} articles from Perplexity")
+                # Run Perplexity search with aggressive timeout protection
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(perplexity_deep_research, curiosity, False),
+                        timeout=30.0  # 30 second max wait
+                    )
+                    articles = result.get("sources", [])
+                    print(f"✅ SSE: Got {len(articles)} articles from Perplexity")
+                except asyncio.TimeoutError:
+                    print(f"⚠️ SSE: Perplexity timed out after 30s, using empty fallback")
+                    articles = []
+                    yield f"data: {json.dumps({'type': 'status', 'message': 'Article search timed out, continuing with other sources...', 'progress': 35})}\n\n"
 
                 # Stream each article
                 for i, article in enumerate(articles):
@@ -1782,8 +1790,17 @@ Respond in JSON:
                 yield f"data: {json.dumps({'type': 'searching', 'query': curiosity, 'category': 'twitter'})}\n\n"
                 await asyncio.sleep(0.2)
 
-                x_accounts = await asyncio.to_thread(discover_x_thought_leaders, curiosity, 10)
-                print(f"✅ SSE: Got {len(x_accounts)} X accounts")
+                # Run X/Twitter discovery with timeout protection
+                try:
+                    x_accounts = await asyncio.wait_for(
+                        asyncio.to_thread(discover_x_thought_leaders, curiosity, 10),
+                        timeout=30.0  # 30 second max wait
+                    )
+                    print(f"✅ SSE: Got {len(x_accounts)} X accounts")
+                except asyncio.TimeoutError:
+                    print(f"⚠️ SSE: X/Twitter discovery timed out after 30s")
+                    x_accounts = []
+                    yield f"data: {json.dumps({'type': 'status', 'message': 'X search timed out, continuing...', 'progress': 90})}\n\n"
 
                 for i, account in enumerate(x_accounts):
                     yield f"data: {json.dumps({'type': 'source_found', 'data': account, 'category': 'twitter', 'index': i})}\n\n"
