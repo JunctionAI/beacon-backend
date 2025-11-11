@@ -35,12 +35,12 @@ from openai import OpenAI
 load_dotenv()
 
 try:
-    from elevenlabs.client import ElevenLabs
-    from elevenlabs import VoiceSettings
-    ELEVENLABS_AVAILABLE = True
+    from google.cloud import texttospeech
+    from google.oauth2 import service_account
+    GOOGLE_TTS_AVAILABLE = True
 except ImportError:
-    print("⚠️  ElevenLabs not installed - audio generation disabled")
-    ELEVENLABS_AVAILABLE = False
+    print("⚠️  Google Cloud TTS not installed - audio generation disabled")
+    GOOGLE_TTS_AVAILABLE = False
 
 app = FastAPI(title="AdCast MVP API")
 
@@ -56,22 +56,29 @@ app.add_middleware(
 # API Keys
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyAeqykSy0cSKCzpGYmn7mEFmJGpLoxPNg8")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "sk_2110086ea581e84ac1881e781281406530df9e033ca6443c")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-elevenlabs_client = None
-if ELEVENLABS_AVAILABLE and ELEVENLABS_API_KEY:
+
+# Initialize Google Cloud TTS client
+google_tts_client = None
+if GOOGLE_TTS_AVAILABLE:
     try:
-        import httpx
-        # Create httpx client with aggressive timeout
-        http_client = httpx.Client(timeout=30.0)
-        elevenlabs_client = ElevenLabs(
-            api_key=ELEVENLABS_API_KEY,
-            httpx_client=http_client
-        )
+        # Try to load credentials from JSON string in environment variable
+        creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        if creds_json:
+            import json
+            creds_dict = json.loads(creds_json)
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            google_tts_client = texttospeech.TextToSpeechClient(credentials=credentials)
+            print("✅ Google Cloud TTS initialized with credentials from env var")
+        else:
+            # Fall back to default credentials (uses GOOGLE_APPLICATION_CREDENTIALS file path)
+            google_tts_client = texttospeech.TextToSpeechClient()
+            print("✅ Google Cloud TTS initialized with default credentials")
     except Exception as e:
-        print(f"⚠️  ElevenLabs init failed: {e}")
+        print(f"⚠️  Google Cloud TTS init failed: {e}")
+        google_tts_client = None
 
 
 # =================== STORAGE CONFIGURATION ===================
@@ -1347,40 +1354,21 @@ def scrape_article(url: str) -> str:
 # =================== AUDIO GENERATION ===================
 
 def generate_podcast_audio(script: str, voice_ids: List[str] = None) -> bytes:
-    """Generate audio from podcast script using ElevenLabs - paragraph-based speaker alternation"""
-    if not elevenlabs_client:
-        print("⚠️  No ElevenLabs API key - skipping audio generation")
+    """Generate audio from podcast script using Google Cloud TTS Journey voices - paragraph-based speaker alternation"""
+    if not google_tts_client:
+        print("⚠️  No Google Cloud TTS client - skipping audio generation")
         return b""
 
     try:
-        # Voice ID mapping: friendly names -> real ElevenLabs IDs
-        VOICE_MAPPING = {
-            "standard_male": "pNInz6obpgDQGcFmaJgB",      # Adam (deep male voice)
-            "standard_female": "21m00Tcm4TlvDq8ikWAM",    # Rachel (female, American)
-            "morgan_freeman": "pNInz6obpgDQGcFmaJgB",     # Use Adam for now (similar deep voice)
-        }
-
-        # Default voices (ElevenLabs built-in)
+        # Default to Journey voices (natural conversational voices)
         if not voice_ids or len(voice_ids) < 2:
             voice_ids = [
-                "pNInz6obpgDQGcFmaJgB",  # Adam (deep male voice)
-                "21m00Tcm4TlvDq8ikWAM"   # Rachel (female, American)
+                "en-US-Journey-D",  # Male voice (warm, friendly)
+                "en-US-Journey-F"   # Female voice (conversational, engaging)
             ]
-        else:
-            # Map friendly voice IDs to real ElevenLabs IDs
-            mapped_voices = []
-            for voice_id in voice_ids:
-                if voice_id in VOICE_MAPPING:
-                    mapped_id = VOICE_MAPPING[voice_id]
-                    print(f"🎤 Mapped voice '{voice_id}' -> '{mapped_id}'")
-                    mapped_voices.append(mapped_id)
-                else:
-                    # Already a real voice ID or unknown - use as-is
-                    print(f"🎤 Using voice ID: '{voice_id}'")
-                    mapped_voices.append(voice_id)
-            voice_ids = mapped_voices
 
-        print(f"🎙️ Using {len(voice_ids)} voice(s) for audio generation")
+        print(f"🎙️ Using {len(voice_ids)} Google Journey voice(s) for audio generation")
+        print(f"   Voices: {', '.join(voice_ids)}")
 
         # Split script by paragraph breaks (double newlines)
         # Each paragraph = one speaker's turn
@@ -1405,8 +1393,23 @@ def generate_podcast_audio(script: str, voice_ids: List[str] = None) -> bytes:
             if len(para) < 10:
                 continue
 
-            # Add segment with alternating speaker
-            segments.append((speaker_idx, para))
+            # Google TTS has 5000 character limit - split long paragraphs
+            if len(para) > 4500:
+                # Split at sentence boundaries
+                sentences = para.replace('! ', '!|').replace('? ', '?|').replace('. ', '.|').split('|')
+                current_chunk = ""
+                for sentence in sentences:
+                    if len(current_chunk) + len(sentence) < 4500:
+                        current_chunk += sentence
+                    else:
+                        if current_chunk:
+                            segments.append((speaker_idx, current_chunk.strip()))
+                        current_chunk = sentence
+                if current_chunk:
+                    segments.append((speaker_idx, current_chunk.strip()))
+            else:
+                # Add segment with alternating speaker
+                segments.append((speaker_idx, para))
 
             # Alternate speakers
             speaker_idx = (speaker_idx + 1) % len(voice_ids)
@@ -1416,39 +1419,49 @@ def generate_podcast_audio(script: str, voice_ids: List[str] = None) -> bytes:
         # Generate audio for each segment with timeout protection
         audio_chunks = []
         for idx, (speaker_idx, text) in enumerate(segments):
-            voice_id = voice_ids[speaker_idx]
+            voice_name = voice_ids[speaker_idx]
 
-            print(f"🎙️ Segment {idx + 1}/{len(segments)} - Voice {speaker_idx + 1}: {text[:60]}...")
+            print(f"🎙️ Segment {idx + 1}/{len(segments)} - Voice {speaker_idx + 1} ({voice_name}): {text[:60]}...")
             import sys
             sys.stdout.flush()  # Force immediate output on Railway
 
             try:
-                audio = elevenlabs_client.text_to_speech.convert(
-                    text=text,
-                    voice_id=voice_id,
-                    model_id="eleven_monolingual_v1",
-                    voice_settings=VoiceSettings(
-                        stability=0.5,
-                        similarity_boost=0.75
-                    )
+                # Configure synthesis input
+                synthesis_input = texttospeech.SynthesisInput(text=text)
+
+                # Configure voice parameters
+                voice = texttospeech.VoiceSelectionParams(
+                    language_code="en-US",
+                    name=voice_name
                 )
 
-                # Collect audio bytes
-                audio_bytes = b''
-                for chunk in audio:
-                    audio_bytes += chunk
+                # Configure audio output
+                audio_config = texttospeech.AudioConfig(
+                    audio_encoding=texttospeech.AudioEncoding.MP3,
+                    speaking_rate=1.0,   # Natural speed
+                    pitch=0.0            # Natural pitch
+                )
 
-                audio_chunks.append(audio_bytes)
+                # Perform text-to-speech request
+                response = google_tts_client.synthesize_speech(
+                    input=synthesis_input,
+                    voice=voice,
+                    audio_config=audio_config
+                )
+
+                # Add audio content to chunks
+                audio_chunks.append(response.audio_content)
 
             except Exception as e:
                 print(f"⚠️ Segment {idx + 1} failed: {e} - skipping")
                 sys.stdout.flush()
                 continue  # Skip failed segment, continue with rest
 
-        # Combine all audio chunks
+        # Combine all audio chunks (MP3 files concatenate easily)
         full_audio = b''.join(audio_chunks)
 
         print(f"✅ Generated {len(full_audio) / (1024*1024):.2f} MB of audio from {len(segments)} segments")
+        print(f"💰 Estimated cost: ${len(script) / 1000000 * 16:.2f} (@ $16 per 1M chars)")
         return full_audio
 
     except Exception as e:
