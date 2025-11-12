@@ -36,11 +36,22 @@ load_dotenv()
 
 try:
     from google.cloud import texttospeech
+    from google.cloud.texttospeech_v1beta1 import TextToSpeechClient as GeminiTTSClient
+    from google.cloud.texttospeech_v1beta1.types import (
+        SynthesisInput as GeminiSynthesisInput,
+        VoiceSelectionParams as GeminiVoiceParams,
+        AudioConfig as GeminiAudioConfig,
+        AudioEncoding as GeminiAudioEncoding,
+        MultiSpeakerVoiceConfig,
+        MultispeakerPrebuiltVoice
+    )
     from google.oauth2 import service_account
     GOOGLE_TTS_AVAILABLE = True
+    GEMINI_TTS_AVAILABLE = True
 except ImportError:
     print("⚠️  Google Cloud TTS not installed - audio generation disabled")
     GOOGLE_TTS_AVAILABLE = False
+    GEMINI_TTS_AVAILABLE = False
 
 app = FastAPI(title="AdCast MVP API")
 
@@ -60,8 +71,10 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Initialize Google Cloud TTS client
+# Initialize Google Cloud TTS clients
 google_tts_client = None
+gemini_tts_client = None
+
 if GOOGLE_TTS_AVAILABLE:
     try:
         # Try to load credentials from JSON string in environment variable
@@ -72,10 +85,24 @@ if GOOGLE_TTS_AVAILABLE:
             credentials = service_account.Credentials.from_service_account_info(creds_dict)
             google_tts_client = texttospeech.TextToSpeechClient(credentials=credentials)
             print("✅ Google Cloud TTS initialized with credentials from env var")
+
+            # Also initialize Gemini TTS client for multi-speaker dialogue
+            if GEMINI_TTS_AVAILABLE:
+                try:
+                    gemini_tts_client = GeminiTTSClient(credentials=credentials)
+                    print("✅ Gemini-TTS multi-speaker initialized")
+                except Exception as e:
+                    print(f"⚠️  Gemini-TTS init failed: {e}")
         else:
             # Fall back to default credentials (uses GOOGLE_APPLICATION_CREDENTIALS file path)
             google_tts_client = texttospeech.TextToSpeechClient()
             print("✅ Google Cloud TTS initialized with default credentials")
+            if GEMINI_TTS_AVAILABLE:
+                try:
+                    gemini_tts_client = GeminiTTSClient()
+                    print("✅ Gemini-TTS multi-speaker initialized with default credentials")
+                except Exception as e:
+                    print(f"⚠️  Gemini-TTS init failed: {e}")
     except Exception as e:
         print(f"⚠️  Google Cloud TTS init failed: {e}")
         google_tts_client = None
@@ -1471,6 +1498,129 @@ def generate_podcast_audio(script: str, voice_ids: List[str] = None) -> bytes:
         return b""
 
 
+def generate_gemini_multispeaker_audio(script: str, speakers: List[Dict[str, str]] = None) -> bytes:
+    """
+    Generate audio from podcast script using Gemini-TTS multi-speaker dialogue
+
+    Args:
+        script: Podcast script with speaker labels (e.g., "Alex: Hello!\nLuna: Hi there!")
+        speakers: List of speaker configs, e.g., [{"alias": "Alex", "voice": "Alnilam"}, ...]
+
+    Returns:
+        Audio bytes (MP3 format) or empty bytes on error
+    """
+    if not gemini_tts_client:
+        print("⚠️  No Gemini TTS client - falling back to standard TTS")
+        return b""
+
+    try:
+        # Default speakers: Alex (Alnilam - male) and Luna (Autonoe - female)
+        if not speakers or len(speakers) < 2:
+            speakers = [
+                {"alias": "Alex", "voice": "Alnilam"},   # Curious & thoughtful explorer (male)
+                {"alias": "Luna", "voice": "Autonoe"}     # Enthusiastic & energetic co-host (female)
+            ]
+
+        print(f"🎙️ Using Gemini-TTS multi-speaker with {len(speakers)} voices")
+        for speaker in speakers:
+            print(f"   {speaker['alias']}: {speaker['voice']}")
+
+        # Gemini-TTS has a 4000 byte limit per request
+        # Split long scripts into chunks while preserving speaker turns
+        max_chunk_size = 3500  # Leave buffer for encoding
+
+        # Split script into lines
+        lines = script.strip().split('\n')
+
+        # Group into chunks
+        chunks = []
+        current_chunk = []
+        current_size = 0
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            line_size = len(line.encode('utf-8'))
+
+            # If adding this line exceeds limit, start new chunk
+            if current_size + line_size > max_chunk_size and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_size = line_size
+            else:
+                current_chunk.append(line)
+                current_size += line_size
+
+        # Add final chunk
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+
+        print(f"📝 Split script into {len(chunks)} chunk(s) for Gemini-TTS")
+
+        # Generate audio for each chunk
+        audio_chunks = []
+
+        for chunk_idx, chunk_text in enumerate(chunks):
+            print(f"🎙️ Generating chunk {chunk_idx + 1}/{len(chunks)}...")
+            print(f"   Preview: {chunk_text[:100]}...")
+
+            try:
+                # Configure multi-speaker voices
+                multi_speaker_config = MultiSpeakerVoiceConfig(
+                    speaker_voice_configs=[
+                        MultispeakerPrebuiltVoice(
+                            speaker_alias=speaker["alias"],
+                            speaker_id=speaker["voice"]
+                        ) for speaker in speakers
+                    ]
+                )
+
+                # Synthesis input with speaker-labeled dialogue
+                synthesis_input = GeminiSynthesisInput(text=chunk_text)
+
+                # Audio configuration
+                audio_config = GeminiAudioConfig(
+                    audio_encoding=GeminiAudioEncoding.MP3,
+                    effects_profile_id=["headphone-class-device"]
+                )
+
+                # Generate audio using Gemini-TTS multi-speaker dialogue API
+                response = gemini_tts_client.synthesize_speech(
+                    input=synthesis_input,
+                    voice=GeminiVoiceParams(
+                        language_code="en-US",
+                        model_name="gemini-2.5-flash-tts",
+                        multi_speaker_voice_config=multi_speaker_config
+                    ),
+                    audio_config=audio_config
+                )
+
+                audio_chunks.append(response.audio_content)
+                print(f"   ✅ Generated {len(response.audio_content) / 1024:.1f} KB")
+
+            except Exception as e:
+                print(f"⚠️ Chunk {chunk_idx + 1} failed: {e}")
+                import traceback
+                print(traceback.format_exc())
+                continue  # Skip failed chunk
+
+        # Combine all audio chunks
+        full_audio = b''.join(audio_chunks)
+
+        print(f"✅ Generated {len(full_audio) / (1024*1024):.2f} MB of audio from {len(chunks)} chunk(s)")
+        print(f"💰 Estimated cost: ${len(script) / 1000000 * 16:.2f} (@ $16 per 1M chars)")
+
+        return full_audio
+
+    except Exception as e:
+        print(f"❌ Gemini-TTS audio generation error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return b""
+
+
 # =================== API ENDPOINTS ===================
 
 class CuriosityRequest(BaseModel):
@@ -2467,7 +2617,17 @@ async def generate_smart_podcast(request: GeneratePodcastRequest):
                 "content": f"""You are creating a {request.duration}-minute podcast with the following specifications:
 
 **PODCAST HOSTS:**
-The two hosts are named James (male voice) and Sophia (female voice). They are knowledgeable, engaging conversationalists who work well together. Note: You will NOT write their names in the script - the script uses pure dialogue without labels.
+The two hosts are named Alex (male voice - curious & thoughtful explorer) and Luna (female voice - enthusiastic & energetic co-host). They are knowledgeable, engaging conversationalists who work well together.
+
+**IMPORTANT - SPEAKER LABELS REQUIRED:**
+You MUST label each speaker's dialogue with their name followed by a colon. This is CRITICAL for the multi-speaker audio generation system.
+
+Format:
+Alex: [Alex's dialogue here]
+
+Luna: [Luna's dialogue here]
+
+Alex: [Alex's response]
 
 **LISTENER'S CURIOSITY:**
 The listener asked: "{request.curiosity}"
@@ -2540,26 +2700,37 @@ You know what's interesting about this? Nicaragua's economy has gone through suc
 Absolutely. So according to the latest IMF data, Nicaragua's GDP has been...
 ```
 
-❌ WRONG (Has labels):
+✅ CORRECT FORMAT (With speaker labels):
 ```
-Alex: Welcome back! Today we're exploring...
-Jordan: You know what's interesting about this?
+Alex: Welcome back to another deep dive! Today we're exploring a fascinating question about...
+
+Luna: This is such an interesting topic! What really caught my attention is how it connects to...
+
+Alex: Exactly! And when you think about the broader implications...
 ```
 
-❌ WRONG (Has stage directions):
+❌ WRONG (Stage directions):
 ```
 *excited* Welcome back! *laughs* Today we're exploring...
 ```
 
-**CRITICAL:**
-- This is AUDIO ONLY - listeners cannot see labels or stage directions
-- The audio generation system will automatically assign voices to alternating paragraphs
+❌ WRONG (No labels):
+```
+Welcome back! Today we're exploring...
+
+This is interesting because...
+```
+
+**CRITICAL REQUIREMENTS:**
+- MUST include speaker labels (Alex: or Luna:) at the start of each dialogue turn
+- This is AUDIO ONLY - no stage directions or actions
 - Make it sound natural and authentic
 - Use contractions and conversational language
-- Express reactions through WORDS, not descriptions
+- Express emotions through WORDS, not descriptions
+- Alternate between Alex and Luna naturally throughout the conversation
 - Create a podcast that matches ALL the specified parameters
 
-Generate the complete {request.duration}-minute podcast script now (pure dialogue, no labels, paragraph breaks between speakers):"""
+Generate the complete {request.duration}-minute podcast script now (with speaker labels, no stage directions):"""
             }]
         )
 
@@ -2573,19 +2744,25 @@ Generate the complete {request.duration}-minute podcast script now (pure dialogu
             f.write(f"TOPIC: {request.curiosity}\n")
             f.write(f"DURATION: {request.duration} minutes\n")
             f.write(f"TONE: {tone_level}/10, DEPTH: {technical_depth}/10\n")
-            f.write(f"HOSTS: James (male) and Sophia (female)\n")
+            f.write(f"HOSTS: Alex (male) and Luna (female)\n")
             f.write("="*80 + "\n\n")
             f.write(script)
         print(f"📝 Saved script to {script_path}")
 
         # 5. Generate AUDIO with overall timeout protection
-        print(f"\n🔊 Generating audio with Google Cloud TTS...")
+        print(f"\n🔊 Generating audio with Gemini-TTS multi-speaker...")
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
         try:
+            # Prepare speaker configuration (Alex and Luna)
+            speakers = [
+                {"alias": "Alex", "voice": "Alnilam"},    # Male - curious & thoughtful
+                {"alias": "Luna", "voice": "Autonoe"}      # Female - enthusiastic & energetic
+            ]
+
             # Run with 10-minute max timeout for entire audio generation
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(generate_podcast_audio, script, request.voice_ids)
+                future = executor.submit(generate_gemini_multispeaker_audio, script, speakers)
                 audio_bytes = future.result(timeout=600)  # 10 minutes max
         except FuturesTimeoutError:
             print("⚠️ Audio generation timed out after 10 minutes - returning without audio")
