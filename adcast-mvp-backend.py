@@ -181,6 +181,7 @@ class Podcast(Base):
     topic = Column(String, nullable=False)
     script = Column(Text, nullable=True)
     audio_url = Column(String, nullable=True)
+    audio_data = Column(LargeBinary, nullable=True)  # Store audio bytes for Railway persistence
     duration = Column(Integer, nullable=True)  # in minutes
     sources_used = Column(Text, nullable=True)  # JSON string
     is_favorite = Column(Boolean, default=False)
@@ -2971,19 +2972,45 @@ Generate the complete {request.duration}-minute podcast script now (with speaker
 
 
 @app.get("/audio/{filename}")
-async def serve_audio(filename: str):
-    """Serve generated podcast audio files"""
+async def serve_audio(filename: str, db: Session = Depends(get_db)):
+    """Serve generated podcast audio files from database or filesystem"""
     import os
+    from fastapi.responses import StreamingResponse
+    import io
 
     # Security: Only allow .mp3 files and prevent directory traversal
     if not filename.endswith('.mp3') or '/' in filename or '\\' in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
+    # On Railway, check database first since /tmp is ephemeral
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
+        print(f"🔍 Railway environment detected - checking database for {filename}")
+
+        # Extract podcast ID from filename (format: podcast_<id>.mp3)
+        try:
+            podcast_id = int(filename.replace('podcast_', '').replace('.mp3', ''))
+            podcast = db.query(Podcast).filter(Podcast.id == podcast_id).first()
+
+            if podcast and podcast.audio_data:
+                print(f"✅ Serving audio from database for podcast {podcast_id}")
+                return StreamingResponse(
+                    io.BytesIO(podcast.audio_data),
+                    media_type="audio/mpeg",
+                    headers={
+                        "Content-Disposition": f'inline; filename="{filename}"',
+                        "Accept-Ranges": "bytes",
+                        "Cache-Control": "public, max-age=3600"
+                    }
+                )
+        except ValueError:
+            pass  # Invalid filename format, fall through to filesystem check
+
+    # Fallback to filesystem for local development or if not in database
     storage_dir = get_storage_dir()
     audio_path = storage_dir / filename
 
     if not os.path.exists(audio_path):
-        raise HTTPException(status_code=404, detail="Audio file not found")
+        raise HTTPException(status_code=404, detail="Audio file not found in database or filesystem")
 
     return FileResponse(
         str(audio_path),
@@ -3377,11 +3404,32 @@ async def save_podcast(
     db: Session = Depends(get_db)
 ):
     """Save a new podcast to user's library"""
+    import os
+
+    # On Railway, read and store audio bytes from filesystem to database for persistence
+    audio_data = None
+    if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT")) and podcast_data.audio_url:
+        try:
+            # Extract filename from audio URL
+            filename = podcast_data.audio_url.split('/')[-1]
+            storage_dir = get_storage_dir()
+            audio_path = storage_dir / filename
+
+            if os.path.exists(audio_path):
+                with open(audio_path, 'rb') as f:
+                    audio_data = f.read()
+                print(f"✅ Stored {len(audio_data)} bytes of audio in database for persistence")
+            else:
+                print(f"⚠️ Audio file not found at {audio_path}")
+        except Exception as e:
+            print(f"⚠️ Error storing audio data: {e}")
+
     new_podcast = Podcast(
         user_id=current_user.id,
         topic=podcast_data.topic,
         script=podcast_data.script,
         audio_url=podcast_data.audio_url,
+        audio_data=audio_data,  # Store audio bytes for Railway
         duration=podcast_data.duration,
         sources_used=podcast_data.sources_used
     )
