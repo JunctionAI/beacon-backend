@@ -298,8 +298,34 @@ class PodcastFeedback(Base):
     podcast = relationship("Podcast", backref="feedback")
 
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Create tables with error handling
+try:
+    # Ensure /data directory exists if on Railway
+    if is_railway_environment():
+        data_dir = Path("/data")
+        if not data_dir.exists():
+            logger.info("📁 Creating /data directory...")
+            data_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("✅ /data directory created")
+
+    # Create database tables
+    logger.info("🗄️  Creating database tables...")
+    Base.metadata.create_all(bind=engine)
+    logger.info("✅ Database tables created successfully")
+
+    # Verify tables exist
+    from sqlalchemy import inspect
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    logger.info(f"📋 Database tables: {tables}")
+
+except Exception as e:
+    logger.error(f"❌ CRITICAL: Database initialization failed: {e}")
+    logger.error(f"   Database URL: {DATABASE_URL}")
+    import traceback
+    logger.error(traceback.format_exc())
+    # Don't crash the app - let it start and report errors via health check
+    pass
 
 
 # =================== STARTUP HEALTH CHECKS ===================
