@@ -3469,29 +3469,52 @@ async def check_database_health(db: Session = Depends(get_db)):
 @app.post("/api/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def register(user_data: UserRegisterRequest, db: Session = Depends(get_db)):
     """Register a new user account"""
-    # Check if user already exists
-    existing_user = db.query(User).filter(User.email == user_data.email).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
+    try:
+        logger.info(f"📝 Registration attempt for email: {user_data.email}")
+
+        # Check if user already exists
+        existing_user = db.query(User).filter(User.email == user_data.email).first()
+        if existing_user:
+            logger.warning(f"⚠️ Registration failed: Email {user_data.email} already exists")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+
+        # Create new user
+        logger.info("🔐 Hashing password...")
+        hashed_password = get_password_hash(user_data.password)
+
+        logger.info("👤 Creating new user...")
+        new_user = User(
+            email=user_data.email,
+            hashed_password=hashed_password
         )
 
-    # Create new user
-    hashed_password = get_password_hash(user_data.password)
-    new_user = User(
-        email=user_data.email,
-        hashed_password=hashed_password
-    )
+        logger.info("💾 Saving user to database...")
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        logger.info(f"✅ User created with ID: {new_user.id}")
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+        # Generate access token
+        logger.info("🎫 Generating JWT token...")
+        access_token = create_access_token(data={"sub": str(new_user.id)})
+        logger.info(f"✅ Registration successful for: {user_data.email}")
 
-    # Generate access token
-    access_token = create_access_token(data={"sub": str(new_user.id)})
+        return TokenResponse(access_token=access_token)
 
-    return TokenResponse(access_token=access_token)
+    except HTTPException:
+        # Re-raise HTTP exceptions (like "Email already registered")
+        raise
+    except Exception as e:
+        logger.error(f"❌ Registration error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Registration failed: {str(e)}"
+        )
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
