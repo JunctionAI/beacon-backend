@@ -502,8 +502,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     """Hash a password (truncate to 72 bytes for bcrypt compatibility)"""
     # Bcrypt has a 72-byte limit - truncate password if needed
-    # Version 2 - Force Railway cache invalidation
+    # Version 3 - WITH PASSWORD TRUNCATION FIX
+    logger.info(f"🔐 PASSWORD HASH v3: Truncating password from {len(password)} chars to max 72 bytes")
     password_bytes = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+    logger.info(f"✅ PASSWORD HASH v3: Password truncated successfully, hashing now...")
     return pwd_context.hash(password_bytes)
 
 
