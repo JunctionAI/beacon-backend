@@ -3440,12 +3440,12 @@ async def get_task_status(task_id: str):
 async def check_database_health(db: Session = Depends(get_db)):
     """Check database connectivity and table status"""
     try:
-        from sqlalchemy import inspect
+        from sqlalchemy import inspect, text
         inspector = inspect(engine)
         tables = inspector.get_table_names()
 
-        # Try a simple query
-        db.execute("SELECT 1")
+        # Try a simple query with proper SQLAlchemy text()
+        db.execute(text("SELECT 1"))
 
         return {
             "status": "healthy",
