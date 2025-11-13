@@ -142,8 +142,18 @@ def get_backend_url():
 
 # =================== DATABASE SETUP ===================
 
+def get_database_url():
+    """Get database URL based on environment"""
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
+        # Railway - use persistent volume
+        # Note: 4 slashes for absolute path in SQLite
+        return "sqlite:////data/adcast.db"
+    else:
+        # Local development
+        return "sqlite:///./adcast.db"
+
 # SQLite database
-DATABASE_URL = "sqlite:///./adcast.db"
+DATABASE_URL = get_database_url()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
