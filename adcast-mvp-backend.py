@@ -1761,7 +1761,7 @@ class GeneratePodcastRequest(BaseModel):
     selectedVideos: List[Dict] = []
     selectedTwitterAccounts: List[Dict] = []
     selectedArticles: List[Dict] = []
-    duration: int = 45
+    duration: int = 12  # 10-15 minute podcasts (default to 12 mins)
     voice_ids: Optional[List[str]] = None  # Google TTS Journey voice IDs for speakers
 
     # Personalization parameters
