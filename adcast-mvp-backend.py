@@ -113,19 +113,57 @@ if GOOGLE_TTS_AVAILABLE:
 # =================== STORAGE CONFIGURATION ===================
 
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+def is_railway_environment():
+    """Detect if running on Railway using reliable environment variable"""
+    # PORT is always set by Railway, RAILWAY_ENVIRONMENT does not exist
+    return os.getenv("PORT") is not None
+
+def verify_volume_mounted(path: Path) -> bool:
+    """Verify that a volume is actually mounted and writable"""
+    try:
+        # Test write access
+        test_file = path / ".volume_test"
+        test_file.write_text("test")
+        test_file.unlink()
+        return True
+    except Exception as e:
+        logger.error(f"Volume verification failed for {path}: {e}")
+        return False
 
 def get_storage_dir():
     """Get appropriate storage directory based on environment"""
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
+    if is_railway_environment():
         # Running on Railway - use persistent volume at /data
         # NOTE: You must add a Railway Volume mounted to /data for this to work
         storage_dir = Path("/data/podcasts")
+
+        # Verify volume is mounted before proceeding
+        if not storage_dir.parent.exists():
+            logger.error("❌ CRITICAL: /data volume not found - volume may not be mounted!")
+            raise RuntimeError("/data volume not found. Please ensure Railway Volume is mounted to /data")
+
+        # Create podcasts directory
+        try:
+            storage_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError as e:
+            logger.error(f"❌ CRITICAL: Permission denied creating {storage_dir}: {e}")
+            raise RuntimeError(f"Cannot create {storage_dir} - check volume permissions")
+
+        # Verify we can write to it
+        if not verify_volume_mounted(storage_dir):
+            logger.error(f"❌ CRITICAL: Cannot write to {storage_dir}")
+            raise RuntimeError(f"Volume at {storage_dir} is not writable")
+
+        logger.info(f"✅ Storage verified: {storage_dir}")
     else:
         # Local development - use home directory
         storage_dir = Path.home()
+        storage_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create directory if it doesn't exist
-    storage_dir.mkdir(parents=True, exist_ok=True)
     return storage_dir
 
 def get_backend_url():
@@ -144,7 +182,7 @@ def get_backend_url():
 
 def get_database_url():
     """Get database URL based on environment"""
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
+    if is_railway_environment():
         # Railway - use persistent volume
         # Note: 4 slashes for absolute path in SQLite
         return "sqlite:////data/adcast.db"
@@ -262,6 +300,79 @@ class PodcastFeedback(Base):
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+
+# =================== STARTUP HEALTH CHECKS ===================
+
+@app.on_event("startup")
+async def startup_health_checks():
+    """Comprehensive startup health checks and diagnostics"""
+    import pwd
+    import stat
+
+    logger.info("=" * 60)
+    logger.info("🚀 BEACON BACKEND STARTUP DIAGNOSTICS")
+    logger.info("=" * 60)
+
+    # Environment Detection
+    is_railway = is_railway_environment()
+    logger.info(f"📍 Environment: {'RAILWAY' if is_railway else 'LOCAL'}")
+    logger.info(f"🔧 PORT env var: {os.getenv('PORT', 'not set')}")
+    logger.info(f"🌐 RAILWAY_PUBLIC_DOMAIN: {os.getenv('RAILWAY_PUBLIC_DOMAIN', 'not set')}")
+    logger.info(f"🌐 BACKEND_URL: {os.getenv('BACKEND_URL', 'not set')}")
+
+    # Process Information
+    try:
+        current_user = pwd.getpwuid(os.getuid())
+        logger.info(f"👤 Running as user: {current_user.pw_name} (UID: {os.getuid()})")
+    except:
+        logger.info(f"👤 Running as UID: {os.getuid()}")
+
+    # Database Information
+    logger.info(f"💾 Database URL: {DATABASE_URL}")
+    db_path = DATABASE_URL.replace("sqlite:///", "").replace("sqlite://", "")
+    if os.path.exists(db_path):
+        db_size = os.path.getsize(db_path) / 1024 / 1024
+        logger.info(f"💾 Database exists: {db_path} ({db_size:.2f} MB)")
+    else:
+        logger.info(f"💾 Database will be created at: {db_path}")
+
+    # Storage Information
+    try:
+        storage_dir = get_storage_dir()
+        logger.info(f"📁 Storage directory: {storage_dir}")
+        logger.info(f"📁 Storage exists: {storage_dir.exists()}")
+
+        # Check permissions
+        if storage_dir.exists():
+            st = os.stat(storage_dir)
+            perms = stat.filemode(st.st_mode)
+            logger.info(f"📁 Storage permissions: {perms} (owner UID: {st.st_uid})")
+            logger.info(f"📁 Storage writable: {os.access(storage_dir, os.W_OK)}")
+
+            # List existing audio files
+            audio_files = list(storage_dir.glob("*.mp3"))
+            logger.info(f"🎵 Existing audio files: {len(audio_files)}")
+            if audio_files:
+                total_size = sum(f.stat().st_size for f in audio_files) / 1024 / 1024
+                logger.info(f"🎵 Total audio storage: {total_size:.2f} MB")
+    except Exception as e:
+        logger.error(f"❌ Storage check failed: {e}")
+        raise
+
+    # Backend URL
+    backend_url = get_backend_url()
+    logger.info(f"🔗 Backend URL: {backend_url}")
+
+    # API Keys Status
+    logger.info(f"🔑 ANTHROPIC_API_KEY: {'✅ Set' if ANTHROPIC_API_KEY else '❌ Not set'}")
+    logger.info(f"🔑 PERPLEXITY_API_KEY: {'✅ Set' if PERPLEXITY_API_KEY else '❌ Not set'}")
+    logger.info(f"🔑 Google TTS: {'✅ Available' if google_tts_client else '❌ Not available'}")
+    logger.info(f"🔑 Gemini TTS: {'✅ Available' if gemini_tts_client else '❌ Not available'}")
+
+    logger.info("=" * 60)
+    logger.info("✅ STARTUP CHECKS COMPLETE - Ready to serve requests")
+    logger.info("=" * 60)
 
 
 # =================== BACKGROUND TASK QUEUE ===================
