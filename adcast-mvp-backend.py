@@ -117,8 +117,9 @@ from pathlib import Path
 def get_storage_dir():
     """Get appropriate storage directory based on environment"""
     if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
-        # Running on Railway - use /tmp directory
-        storage_dir = Path("/tmp/podcasts")
+        # Running on Railway - use persistent volume at /data
+        # NOTE: You must add a Railway Volume mounted to /data for this to work
+        storage_dir = Path("/data/podcasts")
     else:
         # Local development - use home directory
         storage_dir = Path.home()
