@@ -3434,6 +3434,36 @@ async def get_task_status(task_id: str):
     return response
 
 
+# =================== HEALTH CHECK ENDPOINTS ===================
+
+@app.get("/health/db")
+async def check_database_health(db: Session = Depends(get_db)):
+    """Check database connectivity and table status"""
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+
+        # Try a simple query
+        db.execute("SELECT 1")
+
+        return {
+            "status": "healthy",
+            "database_url": DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else "local",
+            "tables": tables,
+            "table_count": len(tables),
+            "expected_tables": ["users", "podcasts", "user_profiles", "podcast_feedback"],
+            "is_railway": is_railway_environment()
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "database_url": DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else "local"
+        }
+
 # =================== AUTH ENDPOINTS ===================
 
 @app.post("/api/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
