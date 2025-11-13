@@ -30,6 +30,8 @@ from youtube_transcript_api import YouTubeTranscriptApi
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -249,6 +251,88 @@ class PodcastFeedback(Base):
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+
+# =================== BACKGROUND TASK QUEUE ===================
+
+import uuid
+import threading
+from typing import Dict, Any
+from enum import Enum
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class TaskQueue:
+    """Simple in-memory task queue for background podcast generation"""
+    def __init__(self):
+        self.tasks: Dict[str, Dict[str, Any]] = {}
+        self.lock = threading.Lock()
+
+    def create_task(self, task_type: str, params: Dict[str, Any]) -> str:
+        """Create a new task and return its ID"""
+        task_id = str(uuid.uuid4())
+        with self.lock:
+            self.tasks[task_id] = {
+                "id": task_id,
+                "type": task_type,
+                "status": TaskStatus.PENDING,
+                "params": params,
+                "result": None,
+                "error": None,
+                "created_at": datetime.utcnow(),
+                "completed_at": None,
+                "progress": 0
+            }
+        return task_id
+
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Get task status and result"""
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task:
+                # Return a copy to avoid threading issues
+                return task.copy()
+            return None
+
+    def update_task(self, task_id: str, **updates):
+        """Update task fields"""
+        with self.lock:
+            if task_id in self.tasks:
+                self.tasks[task_id].update(updates)
+
+    def set_processing(self, task_id: str):
+        """Mark task as processing"""
+        self.update_task(task_id, status=TaskStatus.PROCESSING)
+
+    def set_completed(self, task_id: str, result: Any):
+        """Mark task as completed with result"""
+        self.update_task(
+            task_id,
+            status=TaskStatus.COMPLETED,
+            result=result,
+            completed_at=datetime.utcnow(),
+            progress=100
+        )
+
+    def set_failed(self, task_id: str, error: str):
+        """Mark task as failed with error"""
+        self.update_task(
+            task_id,
+            status=TaskStatus.FAILED,
+            error=error,
+            completed_at=datetime.utcnow()
+        )
+
+    def update_progress(self, task_id: str, progress: int):
+        """Update task progress (0-100)"""
+        self.update_task(task_id, progress=min(max(progress, 0), 100))
+
+# Global task queue instance
+task_queue = TaskQueue()
 
 
 # =================== AUTH UTILITIES ===================
@@ -1498,6 +1582,28 @@ def generate_podcast_audio(script: str, voice_ids: List[str] = None) -> bytes:
         return b""
 
 
+def call_tts_with_timeout(tts_func, timeout_seconds=120):
+    """
+    Wrapper to add timeout protection to Google TTS API calls
+
+    Args:
+        tts_func: Lambda function that makes the TTS call
+        timeout_seconds: Maximum seconds to wait before timing out
+
+    Returns:
+        TTS response object
+
+    Raises:
+        Exception: If call times out or fails
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(tts_func)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError:
+            raise Exception(f"Google TTS call timed out after {timeout_seconds} seconds")
+
+
 def generate_gemini_multispeaker_audio(script: str, speakers: List[Dict[str, str]] = None) -> bytes:
     """
     Generate audio from podcast script using Gemini-TTS multi-speaker dialogue
@@ -1563,48 +1669,70 @@ def generate_gemini_multispeaker_audio(script: str, speakers: List[Dict[str, str
         audio_chunks = []
 
         for chunk_idx, chunk_text in enumerate(chunks):
+            chunk_start_time = time.time()
             print(f"🎙️ Generating chunk {chunk_idx + 1}/{len(chunks)}...")
             print(f"   Preview: {chunk_text[:100]}...")
 
-            try:
-                # Configure multi-speaker voices
-                multi_speaker_config = MultiSpeakerVoiceConfig(
-                    speaker_voice_configs=[
-                        MultispeakerPrebuiltVoice(
-                            speaker_alias=speaker["alias"],
-                            speaker_id=speaker["voice"]
-                        ) for speaker in speakers
-                    ]
-                )
+            # Retry logic with exponential backoff
+            max_retries = 3
+            retry_delay = 2  # Start with 2 seconds
 
-                # Synthesis input with speaker-labeled dialogue
-                synthesis_input = GeminiSynthesisInput(text=chunk_text)
+            for attempt in range(max_retries):
+                try:
+                    api_start_time = time.time()
 
-                # Audio configuration
-                audio_config = GeminiAudioConfig(
-                    audio_encoding=GeminiAudioEncoding.MP3,
-                    effects_profile_id=["headphone-class-device"]
-                )
+                    # Configure multi-speaker voices
+                    multi_speaker_config = MultiSpeakerVoiceConfig(
+                        speaker_voice_configs=[
+                            MultispeakerPrebuiltVoice(
+                                speaker_alias=speaker["alias"],
+                                speaker_id=speaker["voice"]
+                            ) for speaker in speakers
+                        ]
+                    )
 
-                # Generate audio using Gemini-TTS multi-speaker dialogue API
-                response = gemini_tts_client.synthesize_speech(
-                    input=synthesis_input,
-                    voice=GeminiVoiceParams(
-                        language_code="en-US",
-                        model_name="gemini-2.5-flash-tts",
-                        multi_speaker_voice_config=multi_speaker_config
-                    ),
-                    audio_config=audio_config
-                )
+                    # Synthesis input with speaker-labeled dialogue
+                    synthesis_input = GeminiSynthesisInput(text=chunk_text)
 
-                audio_chunks.append(response.audio_content)
-                print(f"   ✅ Generated {len(response.audio_content) / 1024:.1f} KB")
+                    # Audio configuration
+                    audio_config = GeminiAudioConfig(
+                        audio_encoding=GeminiAudioEncoding.MP3,
+                        effects_profile_id=["headphone-class-device"]
+                    )
 
-            except Exception as e:
-                print(f"⚠️ Chunk {chunk_idx + 1} failed: {e}")
-                import traceback
-                print(traceback.format_exc())
-                continue  # Skip failed chunk
+                    # Generate audio using Gemini-TTS multi-speaker dialogue API with timeout protection
+                    response = call_tts_with_timeout(
+                        lambda: gemini_tts_client.synthesize_speech(
+                            input=synthesis_input,
+                            voice=GeminiVoiceParams(
+                                language_code="en-US",
+                                model_name="gemini-2.5-flash-tts",
+                                multi_speaker_voice_config=multi_speaker_config
+                            ),
+                            audio_config=audio_config
+                        ),
+                        timeout_seconds=120  # 2 minute timeout per chunk
+                    )
+
+                    api_duration = time.time() - api_start_time
+
+                    audio_chunks.append(response.audio_content)
+                    chunk_duration = time.time() - chunk_start_time
+                    print(f"   ✅ Generated {len(response.audio_content) / 1024:.1f} KB in {chunk_duration:.1f}s (API: {api_duration:.1f}s)")
+
+                    break  # Success, exit retry loop
+
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        print(f"⚠️ Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {e}")
+                        print(f"   Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        print(f"❌ Chunk {chunk_idx + 1} failed after {max_retries} attempts: {e}")
+                        import traceback
+                        print(traceback.format_exc())
+                        raise Exception(f"Failed to generate chunk {chunk_idx + 1} after {max_retries} attempts")
 
         # Combine all audio chunks
         full_audio = b''.join(audio_chunks)
@@ -1885,12 +2013,58 @@ Respond in JSON:
             print("✅ SSE: Claude recommendations received")
 
             response_text = message.content[0].text
+            print(f"📝 Raw Claude response:\n{response_text[:500]}...")  # Log first 500 chars
+
             if "```json" in response_text:
                 json_start = response_text.find("```json") + 7
                 json_end = response_text.find("```", json_start)
                 response_text = response_text[json_start:json_end].strip()
 
-            claude_data = json.loads(response_text)
+            print(f"📝 Extracted JSON:\n{response_text[:500]}...")  # Log extracted JSON
+
+            try:
+                claude_data = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON parsing error: {e}")
+                print(f"📝 Full response text:\n{response_text}")
+                # Try multiple aggressive JSON fixes
+
+                # Fix 1: Replace single quotes and remove newlines
+                fixed_text = response_text.replace("'", '"').replace('\n', ' ')
+                try:
+                    claude_data = json.loads(fixed_text)
+                    print("✅ Fixed JSON by replacing quotes and removing newlines")
+                except json.JSONDecodeError:
+                    # Fix 2: Try to extract JSON object using regex
+                    import re
+                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+                    if json_match:
+                        try:
+                            claude_data = json.loads(json_match.group(0))
+                            print("✅ Fixed JSON by extracting with regex")
+                        except json.JSONDecodeError:
+                            # Fix 3: Try removing trailing commas (common error)
+                            fixed_text = re.sub(r',\s*}', '}', response_text)
+                            fixed_text = re.sub(r',\s*]', ']', fixed_text)
+                            try:
+                                claude_data = json.loads(fixed_text)
+                                print("✅ Fixed JSON by removing trailing commas")
+                            except json.JSONDecodeError:
+                                # Final fallback: return basic structure
+                                print("⚠️  Using fallback structure due to JSON parsing failure")
+                                claude_data = {
+                                    "books": [],
+                                    "youtubeSearchTerms": [curiosity],
+                                    "articleSearchTerms": [curiosity]
+                                }
+                    else:
+                        # Fallback: return basic structure
+                        print("⚠️  Using fallback structure due to JSON parsing failure")
+                        claude_data = {
+                            "books": [],
+                            "youtubeSearchTerms": [curiosity],
+                            "articleSearchTerms": [curiosity]
+                        }
             books = claude_data.get("books", [])
             youtube_terms = claude_data.get("youtubeSearchTerms", [curiosity])
             print(f"✅ SSE: Got {len(books)} books, {len(youtube_terms)} YouTube terms")
@@ -2819,6 +2993,296 @@ async def serve_audio(filename: str):
             "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
         }
     )
+
+
+# =================== BACKGROUND PODCAST GENERATION ===================
+
+def generate_podcast_background(task_id: str, request_params: Dict[str, Any]):
+    """Background worker function to generate podcast - runs in separate thread"""
+    try:
+        task_queue.set_processing(task_id)
+        task_queue.update_progress(task_id, 10)
+
+        # Convert request params back to GeneratePodcastRequest-like object
+        class RequestObj:
+            def __init__(self, params):
+                for key, value in params.items():
+                    setattr(self, key, value)
+
+        request = RequestObj(request_params)
+
+        sources_text = f"# CURIOSITY: {request.curiosity}\n\n"
+        sources_used = {
+            "books_referenced": [],
+            "videos_extracted": [],
+            "articles_extracted": []
+        }
+
+        # 1. Books
+        print(f"\n📚 Referencing {len(request.selectedBooks)} books...")
+        task_queue.update_progress(task_id, 15)
+        for book in request.selectedBooks:
+            title = book.get("title", "")
+            author = book.get("author", "")
+            sources_text += f"\n\n=== BOOK: {title} by {author} ===\n(Use your knowledge of this book)\n\n"
+            sources_used["books_referenced"].append(f"{title} by {author}")
+
+        # 2. YouTube videos
+        print(f"\n🎥 Processing {len(request.selectedVideos)} videos...")
+        task_queue.update_progress(task_id, 20)
+        for video in request.selectedVideos:
+            video_id = video.get("videoId")
+            title = video.get("title", "Unknown Video")
+            if video_id:
+                transcript = get_youtube_transcript(video_id)
+                if transcript:
+                    sources_text += f"\n\n=== VIDEO: {title} ===\n\n{transcript}\n\n"
+                    sources_used["videos_extracted"].append(title)
+
+        # 3. Articles
+        print(f"\n📄 Processing {len(request.selectedArticles)} articles...")
+        task_queue.update_progress(task_id, 30)
+        for article in request.selectedArticles:
+            url = article.get("url", "")
+            title = article.get("title", "Article")
+            if url:
+                article_text = scrape_article(url)
+                if article_text:
+                    sources_text += f"\n\n=== ARTICLE: {title} ===\n\n{article_text}\n\n"
+                    sources_used["articles_extracted"].append(title)
+
+        # 4. Build prompt parameters
+        tone_level = request.tone_level if hasattr(request, 'tone_level') and request.tone_level is not None else 5
+        technical_depth = request.technical_depth if hasattr(request, 'technical_depth') and request.technical_depth is not None else 5
+        format_type = request.format_type if hasattr(request, 'format_type') else "conversational"
+        pacing = request.pacing if hasattr(request, 'pacing') and request.pacing is not None else 5
+
+        tone_instructions = build_tone_instructions(tone_level)
+        format_instructions = build_format_instructions(format_type, request.duration)
+        depth_instructions = build_depth_instructions(technical_depth)
+        pacing_instructions = build_pacing_instructions(pacing)
+        persona_instructions = build_persona_instructions(request.teaching_persona if hasattr(request, 'teaching_persona') else None)
+        custom_instructions = f"\n**CUSTOM INSTRUCTIONS:**\n{request.custom_instructions}\n" if hasattr(request, 'custom_instructions') and request.custom_instructions else ""
+
+        # 5. Generate script
+        print(f"\n🎙️ Generating {request.duration}-minute podcast...")
+        task_queue.update_progress(task_id, 40)
+
+        target_word_count = request.duration * 150
+        min_word_count = int(target_word_count * 0.9)
+        max_word_count = int(target_word_count * 1.1)
+
+        message = claude_client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=16000,
+            messages=[{
+                "role": "user",
+                "content": f"""You are creating a {request.duration}-minute podcast with the following specifications:
+
+**PODCAST HOSTS:**
+The two hosts are named Alex (male voice - curious & thoughtful explorer) and Luna (female voice - enthusiastic & energetic co-host). They are knowledgeable, engaging conversationalists who work well together.
+
+**IMPORTANT - SPEAKER LABELS REQUIRED:**
+You MUST label each speaker's dialogue with their name followed by a colon. This is CRITICAL for the multi-speaker audio generation system.
+
+Format:
+Alex: [Alex's dialogue here]
+
+Luna: [Luna's dialogue here]
+
+Alex: [Alex's response]
+
+**LISTENER'S CURIOSITY:**
+The listener asked: "{request.curiosity}"
+
+This is a thoughtful question that reveals genuine intellectual curiosity. Your role as podcast hosts Alex and Luna is to be supportive guides helping the listener explore this topic together.
+
+**CRITICAL LENGTH REQUIREMENT:**
+- Target word count: {target_word_count} words (EXACTLY)
+- Minimum acceptable: {min_word_count} words
+- Maximum acceptable: {max_word_count} words
+- Average speaking rate: 150 words per minute
+- This MUST produce a {request.duration}-minute podcast when read aloud
+
+SOURCE MATERIAL TO ANALYZE:
+{sources_text}
+
+{format_instructions}
+
+{tone_instructions}
+
+{depth_instructions}
+
+{pacing_instructions}
+
+{persona_instructions}
+
+{custom_instructions}
+
+**FORMATTING RULES - CRITICAL FOR AUDIO GENERATION:**
+- MUST include speaker labels (Alex: or Luna:) at the start of each dialogue turn
+- Write PURE DIALOGUE with NO stage directions or actions
+- Use paragraph breaks (double line breaks) to separate each speaker's turn
+- Write ONLY what should be spoken aloud
+- DO NOT use brackets, asterisks, or stage directions
+- Alternate between Alex and Luna naturally throughout the conversation
+
+Generate the complete {request.duration}-minute podcast script now (with speaker labels, no stage directions):"""
+            }]
+        )
+
+        script = message.content[0].text
+        task_queue.update_progress(task_id, 70)
+
+        # Save script to file
+        storage_dir = get_storage_dir()
+        script_filename = f"podcast_script_{hash(request.curiosity) % 100000}.txt"
+        script_path = storage_dir / script_filename
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(f"TOPIC: {request.curiosity}\n")
+            f.write(f"DURATION: {request.duration} minutes\n")
+            f.write(f"TONE: {tone_level}/10, DEPTH: {technical_depth}/10\n")
+            f.write(f"HOSTS: Alex (male) and Luna (female)\n")
+            f.write("="*80 + "\n\n")
+            f.write(script)
+        print(f"📝 Saved script to {script_path}")
+
+        # 6. Generate AUDIO
+        print(f"\n🔊 Generating audio with Gemini-TTS multi-speaker...")
+        task_queue.update_progress(task_id, 75)
+
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        try:
+            speakers = [
+                {"alias": "Alex", "voice": "Alnilam"},
+                {"alias": "Luna", "voice": "Autonoe"}
+            ]
+
+            # Save audio filename BEFORE generation so we can use it for backup
+            audio_filename = f"podcast_{hash(request.curiosity) % 100000}.mp3"
+            audio_path = storage_dir / audio_filename
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(generate_gemini_multispeaker_audio, script, speakers)
+                audio_bytes = future.result(timeout=1200)
+
+            # Save audio immediately after successful generation
+            if audio_bytes:
+                with open(audio_path, 'wb') as f:
+                    f.write(audio_bytes)
+                print(f"✅ Saved audio to {audio_path} ({len(audio_bytes) / (1024*1024):.2f} MB)")
+            else:
+                print("⚠️ No audio bytes generated")
+
+        except FuturesTimeoutError:
+            print("⚠️ Audio generation timed out after 20 minutes")
+            # Check if partial audio file exists from backup saves
+            if audio_path.exists():
+                print(f"⚠️ Found existing audio file at {audio_path}, will use it")
+                with open(audio_path, 'rb') as f:
+                    audio_bytes = f.read()
+            else:
+                audio_bytes = b""
+        except Exception as e:
+            print(f"⚠️ Audio generation failed: {e}")
+            import traceback
+            print(traceback.format_exc())
+            # Check if partial audio file exists from backup saves
+            if audio_path.exists():
+                print(f"⚠️ Found existing audio file at {audio_path}, will use it")
+                with open(audio_path, 'rb') as f:
+                    audio_bytes = f.read()
+            else:
+                audio_bytes = b""
+
+        task_queue.update_progress(task_id, 95)
+
+        backend_url = get_backend_url()
+        result = {
+            "status": "completed",
+            "script": script,
+            "audio_url": f"{backend_url}/audio/{audio_filename}" if audio_bytes else None,
+            "audio_available": bool(audio_bytes),
+            "sources_used": sources_used
+        }
+
+        task_queue.set_completed(task_id, result)
+        print(f"✅ Task {task_id} completed successfully")
+
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        print(f"❌ Task {task_id} failed: {error_msg}")
+        print(traceback.format_exc())
+        task_queue.set_failed(task_id, error_msg)
+
+
+@app.post("/api/generate-podcast-async")
+async def generate_podcast_async(request: GeneratePodcastRequest):
+    """Start podcast generation in background and return task ID immediately"""
+    try:
+        # Create task with request parameters
+        request_params = {
+            "curiosity": request.curiosity,
+            "selectedBooks": request.selectedBooks,
+            "selectedVideos": request.selectedVideos,
+            "selectedTwitterAccounts": request.selectedTwitterAccounts,
+            "selectedArticles": request.selectedArticles,
+            "duration": request.duration,
+            "tone_level": request.tone_level,
+            "technical_depth": request.technical_depth,
+            "format_type": request.format_type,
+            "pacing": request.pacing,
+            "teaching_persona": request.teaching_persona,
+            "custom_instructions": request.custom_instructions
+        }
+
+        task_id = task_queue.create_task("podcast_generation", request_params)
+
+        # Start background generation in a separate thread
+        thread = threading.Thread(
+            target=generate_podcast_background,
+            args=(task_id, request_params),
+            daemon=True
+        )
+        thread.start()
+
+        return {
+            "task_id": task_id,
+            "status": "pending",
+            "message": "Podcast generation started. Use /api/task/{task_id} to check status."
+        }
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/task/{task_id}")
+async def get_task_status(task_id: str):
+    """Check status of background task"""
+    task = task_queue.get_task(task_id)
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    response = {
+        "task_id": task["id"],
+        "status": task["status"],
+        "progress": task["progress"],
+        "created_at": task["created_at"].isoformat() if task["created_at"] else None
+    }
+
+    if task["status"] == TaskStatus.COMPLETED:
+        response["result"] = task["result"]
+        response["completed_at"] = task["completed_at"].isoformat() if task["completed_at"] else None
+    elif task["status"] == TaskStatus.FAILED:
+        response["error"] = task["error"]
+        response["completed_at"] = task["completed_at"].isoformat() if task["completed_at"] else None
+
+    return response
 
 
 # =================== AUTH ENDPOINTS ===================
