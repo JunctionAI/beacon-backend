@@ -1624,7 +1624,7 @@ def generate_gemini_multispeaker_audio(script: str, speakers: List[Dict[str, str
         if not speakers or len(speakers) < 2:
             speakers = [
                 {"alias": "Alex", "voice": "Alnilam"},   # Curious & thoughtful explorer (male)
-                {"alias": "Luna", "voice": "Autonoe"}     # Enthusiastic & energetic co-host (female)
+                {"alias": "Luna", "voice": "Autonoe"}     # Thoughtful & curious co-host (female)
             ]
 
         print(f"🎙️ Using Gemini-TTS multi-speaker with {len(speakers)} voices")
@@ -2545,10 +2545,11 @@ def build_format_instructions(format_type: str, duration: int) -> str:
     formats = {
         "conversational": f"""
 **FORMAT: NotebookLM-Style Conversational**
-Two enthusiastic hosts (Host A and Host B) having a natural dialogue.
+Two knowledgeable hosts (Host A and Host B) having a thoughtful, natural dialogue in a calm, NPR-style conversational tone.
 - Natural interruptions and building on each other's ideas
-- Show hosts processing information together
+- Show hosts processing information together with genuine curiosity, not forced excitement
 - Progressive understanding from broad to deep
+- Measured pacing with moments of reflection, not constant high energy
 Structure ({duration} min):
 - Opening (30s): Warm welcome, topic intro
 - Main Content (80%): Natural back-and-forth exploration
@@ -2791,7 +2792,7 @@ async def generate_smart_podcast(request: GeneratePodcastRequest):
                 "content": f"""You are creating a {request.duration}-minute podcast with the following specifications:
 
 **PODCAST HOSTS:**
-The two hosts are named Alex (male voice - curious & thoughtful explorer) and Luna (female voice - enthusiastic & energetic co-host). They are knowledgeable, engaging conversationalists who work well together.
+The two hosts are named Alex (male voice - curious & thoughtful explorer) and Luna (female voice - thoughtful & curious co-host). They are knowledgeable conversationalists who work well together. Their tone is calm, measured, and natural - like NPR or thoughtful podcast hosts, not overly excited or enthusiastic.
 
 **IMPORTANT - SPEAKER LABELS REQUIRED:**
 You MUST label each speaker's dialogue with their name followed by a colon. This is CRITICAL for the multi-speaker audio generation system.
@@ -2806,7 +2807,7 @@ Alex: [Alex's response]
 **LISTENER'S CURIOSITY:**
 The listener asked: "{request.curiosity}"
 
-This is a thoughtful question that reveals genuine intellectual curiosity. Your role as podcast hosts James and Sophia is to be supportive guides helping the listener explore this topic together. Throughout the conversation:
+This is a thoughtful question that reveals genuine intellectual curiosity. Your role as podcast hosts Alex and Luna is to be supportive guides helping the listener explore this topic together. Throughout the conversation:
 - Acknowledge what makes this question interesting and worth exploring
 - Frame the discussion as a collaborative journey of discovery with the listener
 - Be encouraging of curiosity in a genuine, non-effusive way
@@ -3080,7 +3081,7 @@ def generate_podcast_background(task_id: str, request_params: Dict[str, Any]):
                 "content": f"""You are creating a {request.duration}-minute podcast with the following specifications:
 
 **PODCAST HOSTS:**
-The two hosts are named Alex (male voice - curious & thoughtful explorer) and Luna (female voice - enthusiastic & energetic co-host). They are knowledgeable, engaging conversationalists who work well together.
+The two hosts are named Alex (male voice - curious & thoughtful explorer) and Luna (female voice - thoughtful & curious co-host). They are knowledgeable conversationalists who work well together. Their tone is calm, measured, and natural - like NPR or thoughtful podcast hosts, not overly excited or enthusiastic.
 
 **IMPORTANT - SPEAKER LABELS REQUIRED:**
 You MUST label each speaker's dialogue with their name followed by a colon. This is CRITICAL for the multi-speaker audio generation system.
@@ -3095,7 +3096,7 @@ Alex: [Alex's response]
 **LISTENER'S CURIOSITY:**
 The listener asked: "{request.curiosity}"
 
-This is a thoughtful question that reveals genuine intellectual curiosity. Your role as podcast hosts Alex and Luna is to be supportive guides helping the listener explore this topic together.
+This is a thoughtful question that reveals genuine intellectual curiosity. Your role as podcast hosts Alex and Luna is to be supportive guides helping the listener explore this topic together. Speak in a calm, conversational tone - thoughtful and engaging without excessive enthusiasm.
 
 **CRITICAL LENGTH REQUIREMENT:**
 - Target word count: {target_word_count} words (EXACTLY)
