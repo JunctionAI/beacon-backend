@@ -217,6 +217,8 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    password_reset_token = Column(String, nullable=True)
+    password_reset_expires = Column(DateTime, nullable=True)
 
     # Relationships
     podcasts = relationship("Podcast", back_populates="owner", cascade="all, delete-orphan")
@@ -3556,6 +3558,115 @@ async def login(credentials: UserLoginRequest, db: Session = Depends(get_db)):
 async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user info"""
     return current_user
+
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(email: str, db: Session = Depends(get_db)):
+    """Request password reset - sends reset code via email (or returns code for dev)"""
+    try:
+        user = db.query(User).filter(User.email == email).first()
+
+        if not user:
+            # Don't reveal if email exists or not for security
+            return {"message": "If that email exists, a password reset code has been sent"}
+
+        # Generate 6-digit reset code
+        import random
+        reset_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+
+        # Store hashed code and expiration (15 minutes)
+        import hashlib
+        user.password_reset_token = hashlib.sha256(reset_code.encode()).hexdigest()
+        user.password_reset_expires = datetime.utcnow() + timedelta(minutes=15)
+
+        db.commit()
+
+        # TODO: Send email with reset code using SendGrid/AWS SES
+        # For now, return code in response for development
+        logger.info(f"🔐 Password reset code for {email}: {reset_code}")
+
+        return {
+            "message": "If that email exists, a password reset code has been sent",
+            "reset_code": reset_code  # REMOVE THIS IN PRODUCTION - only for dev
+        }
+
+    except Exception as e:
+        logger.error(f"Forgot password error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process password reset request")
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(
+    email: str,
+    reset_code: str,
+    new_password: str,
+    db: Session = Depends(get_db)
+):
+    """Reset password using the reset code"""
+    try:
+        user = db.query(User).filter(User.email == email).first()
+
+        if not user:
+            raise HTTPException(status_code=400, detail="Invalid reset code")
+
+        if not user.password_reset_token or not user.password_reset_expires:
+            raise HTTPException(status_code=400, detail="No password reset requested")
+
+        # Check if code expired
+        if datetime.utcnow() > user.password_reset_expires:
+            raise HTTPException(status_code=400, detail="Reset code has expired")
+
+        # Verify reset code
+        import hashlib
+        hashed_code = hashlib.sha256(reset_code.encode()).hexdigest()
+
+        if hashed_code != user.password_reset_token:
+            raise HTTPException(status_code=400, detail="Invalid reset code")
+
+        # Update password
+        user.hashed_password = get_password_hash(new_password)
+        user.password_reset_token = None
+        user.password_reset_expires = None
+
+        db.commit()
+
+        logger.info(f"✅ Password reset successful for {email}")
+
+        return {"message": "Password reset successful"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reset password error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to reset password")
+
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    current_password: str,
+    new_password: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Change password for logged-in user"""
+    try:
+        # Verify current password
+        if not verify_password(current_password, current_user.hashed_password):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+        # Update password
+        current_user.hashed_password = get_password_hash(new_password)
+        db.commit()
+
+        logger.info(f"✅ Password changed successfully for {current_user.email}")
+
+        return {"message": "Password changed successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Change password error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to change password")
 
 
 # =================== PODCAST CRUD ENDPOINTS ===================
