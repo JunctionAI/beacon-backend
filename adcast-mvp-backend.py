@@ -3473,8 +3473,9 @@ async def check_database_health(db: Session = Depends(get_db)):
 
 @app.post("/api/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def register(user_data: UserRegisterRequest, db: Session = Depends(get_db)):
-    """Register a new user account"""
+    """Register a new user account - VERSION 4 WITH BCRYPT FIX"""
     try:
+        logger.info(f"🚀 REGISTRATION V4 - BCRYPT FIX DEPLOYED")
         logger.info(f"📝 Registration attempt for email: {user_data.email}")
 
         # Check if user already exists
