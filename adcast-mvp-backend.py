@@ -495,18 +495,29 @@ def get_db():
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a password against its hash - Version 5 with direct bcrypt"""
+    import bcrypt as bcrypt_lib
+    # Truncate password to 72 bytes before verification
+    password_bytes = plain_password.encode('utf-8')[:72]
+    hashed_bytes = hashed_password.encode('utf-8')
+    return bcrypt_lib.checkpw(password_bytes, hashed_bytes)
 
 
 def get_password_hash(password: str) -> str:
     """Hash a password (truncate to 72 bytes for bcrypt compatibility)"""
     # Bcrypt has a 72-byte limit - truncate password if needed
-    # Version 3 - WITH PASSWORD TRUNCATION FIX
-    logger.info(f"🔐 PASSWORD HASH v3: Truncating password from {len(password)} chars to max 72 bytes")
-    password_bytes = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
-    logger.info(f"✅ PASSWORD HASH v3: Password truncated successfully, hashing now...")
-    return pwd_context.hash(password_bytes)
+    # Version 5 - Direct bcrypt to avoid passlib bug
+    import bcrypt as bcrypt_lib
+    logger.info(f"🔐 PASSWORD HASH v5: Using direct bcrypt, password length: {len(password)} chars")
+
+    # Truncate to 72 bytes to comply with bcrypt limits
+    password_bytes = password.encode('utf-8')[:72]
+    logger.info(f"✅ PASSWORD HASH v5: Truncated to {len(password_bytes)} bytes, hashing...")
+
+    # Use bcrypt directly instead of passlib
+    salt = bcrypt_lib.gensalt()
+    hashed = bcrypt_lib.hashpw(password_bytes, salt)
+    return hashed.decode('utf-8')
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
